@@ -24,56 +24,35 @@ public class HoleAnnotationTool : MonoBehaviour
     [Header("UI Components")]
     public RawImage imageDisplay;
     public AspectRatioFitter aspectFitter;
-    public TMP_InputField inputField;
+    public TMP_InputField inputField;    // 如不需要可自行移除
     public Text noticeText;
     public Button confirmButton;
-
-    [Header("Deletion UI")]
-    public GameObject deletePanel;       // 一個包含問題文字 + Yes/No 按鈕的 Panel，預設隱藏
-    public Text deleteQuestionText;      // Panel 裡顯示 "要刪除孔洞 #id 嗎？"
-    public Button deleteYesButton;
-    public Button deleteNoButton;
-
 
     [Header("Marker Prefab")]
     public GameObject markerPrefab;
 
     // 內部使用
-    private RectTransform markerParent;      // = imageDisplay.rectTransform
+    private RectTransform markerParent;
     private bool imageConfirmed = false;
     private Texture2D currentTexture;
 
-    private Vector2 dragStartLocal;          // 畫框起點（local 座標）
+    private Vector2 dragStartLocal;
     private GameObject currentMarker;
     private List<HoleAnnotation> annotations = new List<HoleAnnotation>();
 
-    // 用來暫存「待刪除」的 id + marker 物件
-    private int pendingDeleteId;
-    private GameObject pendingDeleteMarker;
-
     void Start()
     {
-        // 1. RawImage 能接受點擊
+        // 1. RawImage 能接收點擊
         imageDisplay.raycastTarget = true;
-
-        // 2. AspectRatio 設為 FitInParent
         aspectFitter.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
 
-        var canvasRT = imageDisplay.canvas.GetComponent<RectTransform>();
-        float canvasH = canvasRT.rect.height;
-
-        // 例如：圖片佔螢幕 60% 的高度
-        float targetH = canvasH * 0.6f;
+        // 2. 設定 imageDisplay 範圍：上方 60% 畫面
         var imgRT = imageDisplay.rectTransform;
-        imgRT.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, targetH);
+        imgRT.anchorMin = new Vector2(0, 0.4f);
+        imgRT.anchorMax = new Vector2(1, 1f);
+        imgRT.offsetMin = imgRT.offsetMax = Vector2.zero;
 
-        // （可選）如果想讓它固定貼齊上方
-        imgRT.anchorMin = new Vector2(0, 1);
-        imgRT.anchorMax = new Vector2(1, 1);
-        imgRT.pivot = new Vector2(0.5f, 1);
-        imgRT.anchoredPosition = Vector2.zero;
-
-        // 3. 把 markerParent 指到 RawImage 的 RectTransform，並拉滿它
+        // 3. markerParent 直接指到 imageDisplay 並覆蓋它
         markerParent = imageDisplay.rectTransform;
         markerParent.pivot = Vector2.zero;
         markerParent.anchorMin = Vector2.zero;
@@ -81,7 +60,7 @@ public class HoleAnnotationTool : MonoBehaviour
         markerParent.anchoredPosition = Vector2.zero;
         markerParent.sizeDelta = Vector2.zero;
 
-        // 4. 點 RawImage 觸發載圖
+        // 4. 點 RawImage 才能選圖（確認前）
         var trigger = imageDisplay.gameObject.AddComponent<EventTrigger>();
         var entry = new EventTrigger.Entry
         {
@@ -95,14 +74,13 @@ public class HoleAnnotationTool : MonoBehaviour
         // 5. 確認按鈕
         confirmButton.onClick.AddListener(ConfirmImage);
         confirmButton.gameObject.SetActive(false);
-        deleteYesButton.onClick.AddListener(OnDeleteYes);
-        deleteNoButton.onClick.AddListener(() => deletePanel.SetActive(false));
 
         noticeText.text = "請先選擇圖片";
     }
 
     public void PickImage()
     {
+        // 已確認過就不再選圖
         if (imageConfirmed)
         {
             noticeText.text = "圖片已確認，無法重新選擇";
@@ -120,7 +98,7 @@ public class HoleAnnotationTool : MonoBehaviour
                 return;
             }
 
-            // 轉貼圖可讀、正向
+            // 轉到可讀貼圖、若需要旋轉則旋轉
             tex = MakeReadable(tex);
             if (tex.height > tex.width)
                 tex = RotateTexture(tex, true);
@@ -128,7 +106,7 @@ public class HoleAnnotationTool : MonoBehaviour
             currentTexture = tex;
             imageDisplay.texture = tex;
 
-            // 依螢幕給個最大尺寸，再套用 AspectRatioFitter
+            // 給最大範圍後套用 FitInParent
             float maxW = Screen.width * 0.8f;
             float maxH = Screen.height * 0.6f;
             float scale = Mathf.Min(maxW / tex.width, maxH / tex.height, 1f);
@@ -138,7 +116,7 @@ public class HoleAnnotationTool : MonoBehaviour
             imageDisplay.rectTransform.SetSizeWithCurrentAnchors(
                 RectTransform.Axis.Vertical, tex.height * scale);
 
-            noticeText.text = $"圖片已載入 ({tex.width}x{tex.height})，請按確認";
+            noticeText.text = $"圖片已載入 ({tex.width}×{tex.height})，請按確認";
             confirmButton.gameObject.SetActive(true);
         }, "選擇一張圖片");
     }
@@ -170,20 +148,20 @@ public class HoleAnnotationTool : MonoBehaviour
             HandleTouch(t.phase, t.position, cam);
         }
 #else
-        if (Input.GetMouseButtonDown(0))  HandleTouch(TouchPhase.Began,  Input.mousePosition, cam);
-        if (Input.GetMouseButton(0))      HandleTouch(TouchPhase.Moved,  Input.mousePosition, cam);
-        if (Input.GetMouseButtonUp(0))    HandleTouch(TouchPhase.Ended,  Input.mousePosition, cam);
+        if (Input.GetMouseButtonDown(0)) HandleTouch(TouchPhase.Began, Input.mousePosition, cam);
+        if (Input.GetMouseButton(0)) HandleTouch(TouchPhase.Moved, Input.mousePosition, cam);
+        if (Input.GetMouseButtonUp(0)) HandleTouch(TouchPhase.Ended, Input.mousePosition, cam);
 #endif
     }
 
     void HandleTouch(TouchPhase phase, Vector2 screenPos, Camera cam)
     {
-        // 把螢幕點擊轉成 markerParent（RawImage）座標系下的 local
+        // 轉成 markerParent 座標系下的 local
         if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
                 markerParent, screenPos, cam, out Vector2 local))
             return;
 
-        // —— 新增：把 local 鎖在圖片 Rect 內
+        // Clamp 在圖片範圍內
         Rect imgRect = markerParent.rect;
         local.x = Mathf.Clamp(local.x, imgRect.xMin, imgRect.xMax);
         local.y = Mathf.Clamp(local.y, imgRect.yMin, imgRect.yMax);
@@ -191,7 +169,6 @@ public class HoleAnnotationTool : MonoBehaviour
         if (phase == TouchPhase.Began)
         {
             dragStartLocal = local;
-
             currentMarker = Instantiate(markerPrefab, markerParent, false);
             var rt = currentMarker.GetComponent<RectTransform>();
             rt.pivot = Vector2.zero;
@@ -203,11 +180,10 @@ public class HoleAnnotationTool : MonoBehaviour
         {
             var rt = currentMarker.GetComponent<RectTransform>();
 
-            // 同樣也 Clamp 開始與當前點計算出來的 min/max
             float x0 = Mathf.Clamp(dragStartLocal.x, imgRect.xMin, imgRect.xMax);
             float y0 = Mathf.Clamp(dragStartLocal.y, imgRect.yMin, imgRect.yMax);
-            float x1 = Mathf.Clamp(local.x, imgRect.xMin, imgRect.xMax);
-            float y1 = Mathf.Clamp(local.y, imgRect.yMin, imgRect.yMax);
+            float x1 = local.x;
+            float y1 = local.y;
 
             float minX = Mathf.Min(x0, x1);
             float minY = Mathf.Min(y0, y1);
@@ -219,53 +195,21 @@ public class HoleAnnotationTool : MonoBehaviour
         }
         else if (phase == TouchPhase.Ended && currentMarker != null)
         {
-
             var rt = currentMarker.GetComponent<RectTransform>();
             Rect r = markerParent.rect;
-           
 
             float nx = (rt.anchoredPosition.x - r.xMin) / r.width;
             float ny = (rt.anchoredPosition.y - r.yMin) / r.height;
 
             int id = annotations.Count + 1;
             annotations.Add(new HoleAnnotation { id = id, x = nx, y = ny });
+
             var txt = currentMarker.GetComponentInChildren<TMP_Text>();
             if (txt) txt.text = id.ToString();
 
-            var mb = currentMarker.AddComponent<MarkerBehaviour>();
-            mb.holeId = id;
-            mb.onClickMarker = PromptDelete;
-
-
-            var label = currentMarker.GetComponentInChildren<TMP_Text>();
-            if (label) label.text = id.ToString();
             noticeText.text = $"新增孔洞 #{id}";
             currentMarker = null;
         }
-    }
-
-    /// <summary>
-    /// MarkerBehaviour click 時執行：顯示刪除對話框
-    /// </summary>
-    void PromptDelete(int id, GameObject markerGO)
-    {
-        pendingDeleteId = id;
-        pendingDeleteMarker = markerGO;
-        deleteQuestionText.text = $"確定要刪除孔洞 #{id} 嗎？";
-        deletePanel.SetActive(true);
-    }
-
-    /// <summary>
-    /// 按下 Yes 時執行：移除資料 & 刪掉 GameObject
-    /// </summary>
-    void OnDeleteYes()
-    {
-        // 刪除資料
-        annotations.RemoveAll(h => h.id == pendingDeleteId);
-        // 刪除畫面上的框
-        Destroy(pendingDeleteMarker);
-        noticeText.text = $"已刪除孔洞 #{pendingDeleteId}";
-        deletePanel.SetActive(false);
     }
 
     public void SaveJson()
@@ -278,7 +222,7 @@ public class HoleAnnotationTool : MonoBehaviour
         noticeText.text = $"JSON 已儲存於 {Application.persistentDataPath}";
     }
 
-    // 助手：轉成可讀、RGBA32
+    // 工具：轉貼圖可讀、RGBA32
     Texture2D MakeReadable(Texture2D src)
     {
         var rt = RenderTexture.GetTemporary(src.width, src.height);
@@ -291,7 +235,7 @@ public class HoleAnnotationTool : MonoBehaviour
         return r;
     }
 
-    // 輪轉貼圖（CW or CCW）
+    // 工具：旋轉貼圖
     Texture2D RotateTexture(Texture2D src, bool cw)
     {
         int w = src.width, h = src.height;
