@@ -214,7 +214,7 @@
       "depth": 0,
       "source": "git",
       "dependencies": {},
-      "hash": "57ef7fc01ced9c8d700ec80232f919b036dac009"
+      "hash": "e05fc5a14fe582e4938d2597fc1401ca3fceafb0"
     },
     "jillejr.newtonsoft.json-for-unity": {
       "version": "https://github.com/jilleJr/Newtonsoft.Json-for-Unity.git#upm",
