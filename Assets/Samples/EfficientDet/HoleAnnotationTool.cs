@@ -23,8 +23,7 @@ public class HoleAnnotationTool : MonoBehaviour
 {
     [Header("UI Components")]
     public RawImage imageDisplay;
-    // AspectRatioFitter 我們不再需要，但保留變數以防您未來想用
-    public AspectRatioFitter aspectFitter;
+    public AspectRatioFitter aspectFitter; // 這個 AspectRatioFitter 應該是掛在 imageDisplay 物件上
     public TMP_InputField inputField;
     public Text noticeText;
     public Button confirmButton;
@@ -33,7 +32,7 @@ public class HoleAnnotationTool : MonoBehaviour
     public GameObject markerPrefab;
 
     // 內部使用
-    private RectTransform markerParent;
+    private RectTransform markerParent; // 現在，這就是我們的畫布
     private bool imageConfirmed = false;
     private Texture2D currentTexture;
     private Vector2 dragStartLocal;
@@ -44,27 +43,24 @@ public class HoleAnnotationTool : MonoBehaviour
     {
         // 1. 基本設定
         imageDisplay.raycastTarget = true;
-        // 【重要】確保 AspectRatioFitter 已在編輯器中被停用或移除
+
+        // 【重要】確保 AspectRatioFitter 是啟用的，並且模式正確
+        // 這個步驟現在完全由 Unity 編輯器控制，程式碼不需要干涉
         if (aspectFitter != null)
         {
-            aspectFitter.enabled = false;
+            aspectFitter.enabled = true;
+            aspectFitter.aspectMode = AspectRatioFitter.AspectMode.FitInParent;
         }
 
-        // 2. 定義 RawImage 的「最大顯示範圍」為左邊 2/3
-        var imgRT = imageDisplay.rectTransform;
-        imgRT.anchorMin = new Vector2(0, 0);
-        imgRT.anchorMax = new Vector2(2f / 3f, 1);
-        // 清空偏移，讓它的大小完全由錨點決定
-        imgRT.offsetMin = Vector2.zero;
-        imgRT.offsetMax = Vector2.zero;
-        // 將軸心設在左下角，方便我們計算位置
-        imgRT.pivot = new Vector2(0, 0);
-        imgRT.anchoredPosition = Vector2.zero;
+        // 【重要】這裡不再需要程式碼來設定 RawImage 的大小
+        // 因為它的大小現在由它的父物件(ImageContainer)和AspectRatioFitter來決定
 
-        // 3. 設定標記點的父物件
+        // 3. 設定標記點的父物件 (畫布)
+        // 【重要】我們的畫布，就是 imageDisplay 本身。因為它的大小會自動縮放，所以它就是最完美的畫布。
         markerParent = imageDisplay.rectTransform;
 
-        // 4. 為 RawImage 的「整個顯示範圍」加上點擊選圖功能
+        // 4. 點擊圖片區塊來選圖的功能 (可依需求保留或移除)
+        // 注意：現在點擊的範圍會是縮小後的圖片，而不是整個左邊區塊
         var trigger = imageDisplay.gameObject.AddComponent<EventTrigger>();
         var entry = new EventTrigger.Entry { eventID = EventTriggerType.PointerClick };
         entry.callback.AddListener((_) => {
@@ -88,7 +84,7 @@ public class HoleAnnotationTool : MonoBehaviour
     {
         if (imageConfirmed)
         {
-            noticeText.text = "圖片已確認";
+            noticeText.text = "圖片已確認，無法重新選擇";
             return;
         }
 
@@ -110,31 +106,12 @@ public class HoleAnnotationTool : MonoBehaviour
             currentTexture = tex;
             imageDisplay.texture = tex;
 
-            // ---【核心邏輯：手動計算圖片大小與位置】---
+            // ---【核心修改】---
+            // 我們不再需要任何手動計算大小或位置的程式碼。
+            // 所有的工作都交給我們在編輯器設定好的 ImageContainer 和 AspectRatioFitter。
+            // 這讓程式碼變得非常乾淨！
 
-            // 1. 取得 RawImage 最大顯示範圍的寬高
-            float containerWidth = imageDisplay.rectTransform.rect.width;
-            float containerHeight = imageDisplay.rectTransform.rect.height;
-
-            // 2. 計算能讓「圖片本身」完整顯示在容器內的最大縮放比例
-            float widthScale = containerWidth / tex.width;
-            float heightScale = containerHeight / tex.height;
-            float scale = Mathf.Min(widthScale, heightScale);
-
-            // 3. 計算圖片縮放後的實際尺寸
-            float newWidth = tex.width * scale;
-            float newHeight = tex.height * scale;
-
-            // 4. 【關鍵】我們要修改的是 RawImage 的 UV Rect，而不是它的 RectTransform
-            // 這能在不改變「框框」大小的前提下，改變「圖片內容」的顯示方式
-            float uv_x = (1f - newWidth / containerWidth) / 2f;
-            float uv_y = (1f - newHeight / containerHeight) / 2f;
-            float uv_w = newWidth / containerWidth;
-            float uv_h = newHeight / containerHeight;
-            imageDisplay.uvRect = new Rect(uv_x, uv_y, uv_w, uv_h);
-
-
-            noticeText.text = $"圖片已載入 ({tex.width}x{tex.height})";
+            noticeText.text = $"圖片已載入 ({tex.width}x{tex.height})，請按確認";
             if (confirmButton != null)
             {
                 confirmButton.gameObject.SetActive(true);
@@ -177,53 +154,42 @@ public class HoleAnnotationTool : MonoBehaviour
 
     void HandleTouch(TouchPhase phase, Vector2 screenPos, Camera cam)
     {
-        // 取得相對於 markerParent (整個左側2/3區塊) 的本地座標
+        // 我們的畫布(markerParent)現在就是 imageDisplay，它的大小是完美貼合圖片的。
+        // 所以，我們直接在這個完美的畫布上進行座標轉換。
         if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
                 markerParent, screenPos, cam, out Vector2 local))
             return;
 
-        // 根據 UV Rect 計算出實際圖片內容的顯示範圍
-        Rect imgContainerRect = markerParent.rect;
-        Rect uv = imageDisplay.uvRect;
-        float actualImgX = imgContainerRect.x + imgContainerRect.width * uv.x;
-        float actualImgY = imgContainerRect.y + imgContainerRect.height * uv.y;
-        float actualImgW = imgContainerRect.width * uv.width;
-        float actualImgH = imgContainerRect.height * uv.height;
-        Rect actualImageRect = new Rect(actualImgX, actualImgY, actualImgW, actualImgH);
-
-        // 【關鍵修正】我們移除了之前會擋住繪圖的 if 判斷
-        // 現在，即使從黑色區域開始拖曳，框框也會從圖片邊緣開始畫
+        // 【重要】如果點擊的位置不在畫布內，就直接忽略，避免在畫布外產生標記
+        if (!markerParent.rect.Contains(local))
+        {
+            // 如果是在拖曳結束時釋放滑鼠，但滑鼠已經在畫布外，我們還是要處理這個標記
+            if (phase == TouchPhase.Ended && currentMarker != null)
+            {
+                // 這裡的邏輯和下面的 TouchPhase.Ended 一樣
+                FinalizeMarker(local, true); //傳入 true 代表這是在畫布外完成的
+            }
+            return;
+        }
 
         if (phase == TouchPhase.Began)
         {
-            // 將起始點座標強制限制在圖片的實際範圍內
-            Vector2 clampedStartPos = local;
-            clampedStartPos.x = Mathf.Clamp(clampedStartPos.x, actualImageRect.x, actualImageRect.xMax);
-            clampedStartPos.y = Mathf.Clamp(clampedStartPos.y, actualImageRect.y, actualImageRect.yMax);
-
-            dragStartLocal = clampedStartPos; // 儲存被限制過的起始點
-
+            dragStartLocal = local; // 直接使用本地座標
             currentMarker = Instantiate(markerPrefab, markerParent, false);
             var rt = currentMarker.GetComponent<RectTransform>();
             rt.pivot = Vector2.zero;
             rt.anchorMin = rt.anchorMax = Vector2.zero;
-            rt.anchoredPosition = clampedStartPos; // 標記框的初始位置也用限制過的座標
+            rt.anchoredPosition = local;
             rt.sizeDelta = Vector2.zero;
         }
         else if (phase == TouchPhase.Moved && currentMarker != null)
         {
             var rt = currentMarker.GetComponent<RectTransform>();
 
-            // 將當前滑鼠座標也限制在圖片的實際範圍內
-            Vector2 clampedCurrentPos = local;
-            clampedCurrentPos.x = Mathf.Clamp(clampedCurrentPos.x, actualImageRect.x, actualImageRect.xMax);
-            clampedCurrentPos.y = Mathf.Clamp(clampedCurrentPos.y, actualImageRect.y, actualImageRect.yMax);
-
-            // 使用被限制過的起始點和當前點來計算框框的四個角落
             float x0 = dragStartLocal.x;
             float y0 = dragStartLocal.y;
-            float x1 = clampedCurrentPos.x;
-            float y1 = clampedCurrentPos.y;
+            float x1 = local.x;
+            float y1 = local.y;
 
             float minX = Mathf.Min(x0, x1);
             float minY = Mathf.Min(y0, y1);
@@ -235,42 +201,63 @@ public class HoleAnnotationTool : MonoBehaviour
         }
         else if (phase == TouchPhase.Ended && currentMarker != null)
         {
-            var rt = currentMarker.GetComponent<RectTransform>();
-
-            // 如果框框太小，視為誤觸，直接刪除
-            if (rt.sizeDelta.x < 5f || rt.sizeDelta.y < 5f)
-            {
-                Destroy(currentMarker);
-                currentMarker = null;
-                return;
-            }
-
-            // 計算正規化座標時，要以 actualImageRect 為基準
-            float nx = (rt.anchoredPosition.x - actualImageRect.x) / actualImageRect.width;
-            float ny = (rt.anchoredPosition.y - actualImageRect.y) / actualImageRect.height;
-            int id = annotations.Count + 1;
-            annotations.Add(new HoleAnnotation { id = id, x = nx, y = ny });
-
-            // 【關鍵修正】讓程式碼變得更聰明，能同時處理新舊兩種文字元件
-            // 優先尋找 TMP_Text
-            var tmpText = currentMarker.GetComponentInChildren<TMP_Text>();
-            if (tmpText != null)
-            {
-                tmpText.text = id.ToString();
-            }
-            else
-            {
-                // 如果找不到，再去找舊的 Text
-                var legacyText = currentMarker.GetComponentInChildren<Text>();
-                if (legacyText != null)
-                {
-                    legacyText.text = id.ToString();
-                }
-            }
-
-            noticeText.text = $"新增孔洞 #{id}";
-            currentMarker = null;
+            FinalizeMarker(local, false); // 傳入 false 代表這是在畫布內完成的
         }
+    }
+
+    // 新增一個函式來處理標記框的最終生成，避免重複的程式碼
+    void FinalizeMarker(Vector2 localPos, bool outside)
+    {
+        var rt = currentMarker.GetComponent<RectTransform>();
+
+        // 如果是在畫布外完成，我們需要重新計算框框大小，確保它不會超出邊界
+        if (outside)
+        {
+            float x0 = dragStartLocal.x;
+            float y0 = dragStartLocal.y;
+            // 將結束點強制限制在畫布內
+            float x1 = Mathf.Clamp(localPos.x, markerParent.rect.xMin, markerParent.rect.xMax);
+            float y1 = Mathf.Clamp(localPos.y, markerParent.rect.yMin, markerParent.rect.yMax);
+
+            float minX = Mathf.Min(x0, x1);
+            float minY = Mathf.Min(y0, y1);
+            float w = Mathf.Abs(x1 - x0);
+            float h = Mathf.Abs(y1 - y0);
+            rt.anchoredPosition = new Vector2(minX, minY);
+            rt.sizeDelta = new Vector2(w, h);
+        }
+
+
+        if (rt.sizeDelta.x < 5f || rt.sizeDelta.y < 5f)
+        {
+            Destroy(currentMarker);
+            currentMarker = null;
+            return;
+        }
+
+        // 正規化座標的計算也變得非常簡單
+        Rect drawingRect = markerParent.rect;
+        float nx = (rt.anchoredPosition.x - drawingRect.xMin) / drawingRect.width;
+        float ny = (rt.anchoredPosition.y - drawingRect.yMin) / drawingRect.height;
+        int id = annotations.Count + 1;
+        annotations.Add(new HoleAnnotation { id = id, x = nx, y = ny });
+
+        var tmpText = currentMarker.GetComponentInChildren<TMP_Text>();
+        if (tmpText != null)
+        {
+            tmpText.text = id.ToString();
+        }
+        else
+        {
+            var legacyText = currentMarker.GetComponentInChildren<Text>();
+            if (legacyText != null)
+            {
+                legacyText.text = id.ToString();
+            }
+        }
+
+        noticeText.text = $"新增孔洞 #{id}";
+        currentMarker = null;
     }
 
     public void SaveJson()
