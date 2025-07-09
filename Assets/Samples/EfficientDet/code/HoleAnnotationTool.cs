@@ -7,7 +7,6 @@ using UnityEngine.EventSystems;
 using System.Linq;
 using TensorFlowLite;
 
-// 【維持不變】
 public enum OperatingMode { None, ImageLoaded, Viewing, Editing, Numbering, Cropping }
 [System.Serializable] public class HoleAnnotation { public int id; public string label; public float x; public float y; public float width; public float height; }
 [System.Serializable] public class HoleAnnotationList { public List<HoleAnnotation> annotations = new List<HoleAnnotation>(); }
@@ -15,38 +14,40 @@ public enum OperatingMode { None, ImageLoaded, Viewing, Editing, Numbering, Crop
 
 public class HoleAnnotationTool : MonoBehaviour
 {
-    // 【維持不變】
     [Header("UI Components")]
     public RawImage imageDisplay;
     public AspectRatioFitter aspectFitter;
     public Text noticeText;
     public Button confirmButton;
 
-    // 【維持不變】
     [Header("Mode Buttons")]
     public Button EditModeButton;
     public Button NumberingModeButton;
     public Button DeleteAllMarkersButton;
     public Button DeleteAllNumbersButton;
 
-    // 【維持不變】
     [Header("Cropping UI")]
     public Button CropModeButton;
     public Button ConfirmCropButton;
     public Button ResetCropButton;
 
-    // 【維持不變】
+    [Header("4-Point Cropping UI")]
+    public RectTransform cropAreaVisual;
+    public RectTransform topLeftHandle;
+    public RectTransform topRightHandle;
+    public RectTransform bottomLeftHandle;
+    public RectTransform bottomRightHandle;
+    private RectTransform currentlyDraggedHandle;
+
     [Header("Marker Prefab")]
     public GameObject markerPrefab;
 
-    // 【維持不變】
     [Header("AI Model Settings (from EfficientDet)")]
     public EfficientDet.Options options = default;
     public TextAsset labelMapAsset;
     [Range(0f, 1f)]
     public float scoreThreshold = 0.5f;
 
-    // --- 私有變數 ---
     private TFLiteDetector detector;
     private OperatingMode currentMode;
     private int currentNumberingIndex = 1;
@@ -56,19 +57,13 @@ public class HoleAnnotationTool : MonoBehaviour
     private RectTransform markerParent;
     private MarkerBehaviour currentlySelectedMarker;
     private GameObject currentDrawingMarker;
-    private Vector2 manualDrawStartPosition; // 【<<< 步驟1: 新增此變數】
-
-    // 【維持不變】
-    private Vector2 panStartPosition;
-    private Vector2 panStartUVPosition;
-    private const float MIN_ZOOM = 0.1f;
-    private const float MAX_ZOOM = 1.0f;
-    public float zoomSpeed = 0.1f;
+    private Vector2 manualDrawStartPosition;
+    private Vector2 dragOffset;
 
     void Start()
     {
-        // 【維持不變】
         markerParent = imageDisplay.rectTransform;
+        if (cropAreaVisual != null) cropAreaVisual.pivot = new Vector2(0, 0);
 
         EditModeButton.onClick.AddListener(OnClickEditModeButton);
         NumberingModeButton.onClick.AddListener(OnClickNumberingModeButton);
@@ -78,7 +73,7 @@ public class HoleAnnotationTool : MonoBehaviour
 
         CropModeButton.onClick.AddListener(OnClickCropModeButton);
         ConfirmCropButton.onClick.AddListener(ApplyCrop);
-        ResetCropButton.onClick.AddListener(ResetCrop);
+        ResetCropButton.onClick.AddListener(ResetCropHandles);
 
         if (labelMapAsset != null) { if (Application.isEditor) { options.delegateType = TfLiteDelegateType.XNNPACK; } detector = new TFLiteDetector(options, labelMapAsset, scoreThreshold); } else { Debug.LogError("AI 標籤 (Label Map Asset) 未指派！請在 Inspector 中設定。"); }
         SetMode(OperatingMode.None);
@@ -86,37 +81,32 @@ public class HoleAnnotationTool : MonoBehaviour
 
     private void OnDestroy()
     {
-        // 【維持不變】
         detector?.Dispose();
         if (currentTexture != null) Destroy(currentTexture);
     }
 
     void Update()
     {
-        // 【維持不變】
-        if (currentMode == OperatingMode.Cropping) { HandleCropping(); }
+        if (currentMode == OperatingMode.Cropping) { HandleFourPointCrop(); }
         else if (currentMode == OperatingMode.Editing) { HandleManualDrawing(); }
         else if (Input.GetMouseButtonDown(0))
         {
             PointerEventData pointerData = new PointerEventData(EventSystem.current) { position = Input.mousePosition };
             List<RaycastResult> results = new List<RaycastResult>();
             EventSystem.current.RaycastAll(pointerData, results);
-            if (results.Count > 0 && results[0].gameObject.transform.parent.gameObject == imageDisplay.transform.parent.gameObject && currentMode != OperatingMode.Cropping)
+            if (currentMode != OperatingMode.Cropping && results.Count > 0 && results[0].gameObject == imageDisplay.gameObject)
             {
-                if (results[0].gameObject == imageDisplay.gameObject)
+                if (currentMode == OperatingMode.None || currentMode == OperatingMode.ImageLoaded)
                     PickImage();
             }
         }
     }
-
-    // --- 以下所有其他函式都維持不變，只修改 HandleManualDrawing ---
 
     public void PickImage()
     {
         NativeGallery.GetImageFromGallery((path) =>
         {
             if (string.IsNullOrEmpty(path)) return;
-            ResetCrop();
             OnClickDeleteAllMarkersButton();
             Texture2D originalTexture = NativeGallery.LoadImageAtPath(path, -1, false);
             if (originalTexture == null) { SetMode(OperatingMode.None); return; }
@@ -163,128 +153,369 @@ public class HoleAnnotationTool : MonoBehaviour
 
     void SetMode(OperatingMode newMode)
     {
-        if (currentlySelectedMarker != null) { currentlySelectedMarker.SetActionButtonActive(false); currentlySelectedMarker = null; }
+        if (newMode != OperatingMode.Cropping)
+        {
+            SetCropControlsActive(false);
+        }
+
+        if (currentlySelectedMarker != null)
+        {
+            currentlySelectedMarker.SetActionButtonActive(false);
+            currentlySelectedMarker = null;
+        }
+
         currentMode = newMode;
 
-        bool isViewing = currentMode == OperatingMode.Viewing;
-        bool isEditing = currentMode == OperatingMode.Editing;
-        bool isNumbering = currentMode == OperatingMode.Numbering;
-        bool isCropping = currentMode == OperatingMode.Cropping;
-        bool imageIsLoaded = currentMode != OperatingMode.None;
-
         confirmButton.gameObject.SetActive(currentMode == OperatingMode.ImageLoaded);
-        EditModeButton.gameObject.SetActive(isViewing || isNumbering);
-        NumberingModeButton.gameObject.SetActive(isViewing || isEditing);
-        DeleteAllMarkersButton.gameObject.SetActive(isEditing);
-        DeleteAllNumbersButton.gameObject.SetActive(isNumbering);
-
-        CropModeButton.gameObject.SetActive(imageIsLoaded && !isCropping);
-        ConfirmCropButton.gameObject.SetActive(isCropping);
-        ResetCropButton.gameObject.SetActive(isCropping);
+        CropModeButton.gameObject.SetActive(currentMode == OperatingMode.ImageLoaded);
+        EditModeButton.gameObject.SetActive(currentMode == OperatingMode.Viewing || currentMode == OperatingMode.Numbering);
+        NumberingModeButton.gameObject.SetActive(currentMode == OperatingMode.Viewing || currentMode == OperatingMode.Editing);
+        DeleteAllMarkersButton.gameObject.SetActive(currentMode == OperatingMode.Editing);
+        DeleteAllNumbersButton.gameObject.SetActive(currentMode == OperatingMode.Numbering);
+        ConfirmCropButton.gameObject.SetActive(currentMode == OperatingMode.Cropping);
+        ResetCropButton.gameObject.SetActive(currentMode == OperatingMode.Cropping);
 
         switch (currentMode)
         {
-            case OperatingMode.None: noticeText.text = "請點擊畫面載入圖片"; break;
-            case OperatingMode.ImageLoaded: noticeText.text = "圖片已載入，可進行AI偵測或進入裁切模式"; break;
-            case OperatingMode.Viewing: noticeText.text = $"圖片已確認，可切換模式"; UpdateMarkersForViewingMode(); break;
-            case OperatingMode.Editing: noticeText.text = "編輯模式：可拖曳、點擊選取、或拖曳背景以新增"; UpdateMarkersForEditingMode(); break;
-            case OperatingMode.Numbering: noticeText.text = "編號模式：點擊按鈕以編號"; UpdateMarkersForNumberingMode(); break;
-            case OperatingMode.Cropping: noticeText.text = "裁切模式：拖曳以平移，滾輪以縮放"; UpdateMarkersForViewingMode(); break;
+            case OperatingMode.None:
+                noticeText.text = "請點擊畫面載入圖片";
+                break;
+            case OperatingMode.ImageLoaded:
+                noticeText.text = "圖片已載入，請確認或進行裁切";
+                break;
+            case OperatingMode.Viewing:
+                noticeText.text = "檢視模式，請選擇操作";
+                UpdateMarkersForViewingMode();
+                break;
+            case OperatingMode.Editing:
+                noticeText.text = "編輯模式：可新增、拖曳、刪除標記框";
+                UpdateMarkersForEditingMode();
+                break;
+            case OperatingMode.Numbering:
+                noticeText.text = "編號模式：請點擊標記框右上角的按鈕進行編號";
+                currentNumberingIndex = 1;
+                foreach (var markerGO in allMarkers) { markerGO.GetComponent<MarkerBehaviour>().SetActionButtonText(""); }
+                UpdateMarkersForNumberingMode();
+                break;
+            // 【步驟1: 已修改】
+            case OperatingMode.Cropping:
+                noticeText.text = "裁切模式：請拖曳角落控制點以調整範圍";
+                UpdateMarkersForViewingMode();
+                SetCropControlsActive(true);
+                StartCoroutine(ResetHandlesAfterFrame()); // 改為啟動協程
+                break;
         }
     }
 
-    void HandleCropping()
+    #region Cropping Logic
+
+    // 【步驟2: 已新增】
+    private System.Collections.IEnumerator ResetHandlesAfterFrame()
     {
-        var rt = imageDisplay.rectTransform;
-        Camera cam = imageDisplay.canvas.worldCamera;
+        // 等待當前畫面影格的結尾，此時所有UI佈局都已計算完畢
+        yield return new WaitForEndOfFrame();
 
-        if (!RectTransformUtility.RectangleContainsScreenPoint(rt, Input.mousePosition, cam)) { return; }
+        // 現在才執行位置設定
+        ResetCropHandles();
+    }
 
-        float scroll = Input.mouseScrollDelta.y;
-        if (scroll != 0)
-        {
-            Rect uvRect = imageDisplay.uvRect;
-            RectTransformUtility.ScreenPointToLocalPointInRectangle(rt, Input.mousePosition, cam, out Vector2 localPos);
-            Vector2 pivot = new Vector2((localPos.x - rt.rect.x) / rt.rect.width, (localPos.y - rt.rect.y) / rt.rect.height);
-            float zoomFactor = 1 - scroll * zoomSpeed;
-            float newWidth = Mathf.Clamp(uvRect.width * zoomFactor, MIN_ZOOM, MAX_ZOOM);
-            float newHeight = Mathf.Clamp(uvRect.height * zoomFactor, MIN_ZOOM, MAX_ZOOM);
-            uvRect.x = pivot.x - (pivot.x - uvRect.x) * (newWidth / uvRect.width);
-            uvRect.y = pivot.y - (pivot.y - uvRect.y) * (newHeight / uvRect.height);
-            uvRect.width = newWidth;
-            uvRect.height = newHeight;
-            imageDisplay.uvRect = uvRect;
-        }
+    private void SetCropControlsActive(bool isActive)
+    {
+        if (cropAreaVisual != null) cropAreaVisual.gameObject.SetActive(isActive);
+        if (topLeftHandle != null) topLeftHandle.gameObject.SetActive(isActive);
+        if (topRightHandle != null) topRightHandle.gameObject.SetActive(isActive);
+        if (bottomLeftHandle != null) bottomLeftHandle.gameObject.SetActive(isActive);
+        if (bottomRightHandle != null) bottomRightHandle.gameObject.SetActive(isActive);
+    }
+
+    private void ResetCropHandles()
+    {
+        if (imageDisplay.texture == null || topLeftHandle == null) return;
+
+        Vector3[] imageCorners = new Vector3[4];
+        imageDisplay.rectTransform.GetWorldCorners(imageCorners);
+
+        topLeftHandle.position = imageCorners[1];
+        topRightHandle.position = imageCorners[2];
+        bottomRightHandle.position = imageCorners[3];
+        bottomLeftHandle.position = imageCorners[0];
+
+        UpdateCropVisuals();
+    }
+
+    void HandleFourPointCrop()
+    {
+        Camera cam = imageDisplay.canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : imageDisplay.canvas.worldCamera;
+        var handleParent = (RectTransform)topLeftHandle.parent;
 
         if (Input.GetMouseButtonDown(0))
         {
-            panStartPosition = Input.mousePosition;
-            panStartUVPosition = imageDisplay.uvRect.position;
-        }
+            RectTransform[] handles = { topLeftHandle, topRightHandle, bottomLeftHandle, bottomRightHandle };
+            currentlyDraggedHandle = null;
 
-        if (Input.GetMouseButton(0))
+            foreach (var handle in handles)
+            {
+                if (handle != null && RectTransformUtility.RectangleContainsScreenPoint(handle, Input.mousePosition, cam))
+                {
+                    currentlyDraggedHandle = handle;
+                    break;
+                }
+            }
+
+            if (currentlyDraggedHandle != null)
+            {
+                if (RectTransformUtility.ScreenPointToLocalPointInRectangle(handleParent, Input.mousePosition, cam, out Vector2 localMousePos))
+                {
+                    dragOffset = currentlyDraggedHandle.anchoredPosition - localMousePos;
+                }
+            }
+        }
+        else if (Input.GetMouseButton(0) && currentlyDraggedHandle != null)
         {
-            Vector2 delta = (Vector2)Input.mousePosition - panStartPosition;
-            float deltaUVX = -(delta.x / rt.rect.width) * imageDisplay.uvRect.width;
-            float deltaUVY = -(delta.y / rt.rect.height) * imageDisplay.uvRect.height;
-            Rect uvRect = imageDisplay.uvRect;
-            uvRect.position = panStartUVPosition + new Vector2(deltaUVX, deltaUVY);
-            imageDisplay.uvRect = uvRect;
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(handleParent, Input.mousePosition, cam, out Vector2 localMousePos))
+            {
+                currentlyDraggedHandle.anchoredPosition = localMousePos + dragOffset;
+                UpdateCropVisuals();
+            }
+        }
+        else if (Input.GetMouseButtonUp(0) && currentlyDraggedHandle != null)
+        {
+            currentlyDraggedHandle = null;
+        }
+    }
+
+    void UpdateCropVisuals()
+    {
+        if (topLeftHandle == null || topRightHandle == null || bottomLeftHandle == null || bottomRightHandle == null || cropAreaVisual == null) return;
+
+        Vector2 tlPos = topLeftHandle.anchoredPosition;
+        Vector2 trPos = topRightHandle.anchoredPosition;
+        Vector2 blPos = bottomLeftHandle.anchoredPosition;
+        Vector2 brPos = bottomRightHandle.anchoredPosition;
+
+        if (currentlyDraggedHandle == topLeftHandle)
+        {
+            bottomLeftHandle.anchoredPosition = new Vector2(tlPos.x, brPos.y);
+            topRightHandle.anchoredPosition = new Vector2(brPos.x, tlPos.y);
+        }
+        else if (currentlyDraggedHandle == bottomRightHandle)
+        {
+            topRightHandle.anchoredPosition = new Vector2(brPos.x, tlPos.y);
+            bottomLeftHandle.anchoredPosition = new Vector2(tlPos.x, brPos.y);
+        }
+        else if (currentlyDraggedHandle == topRightHandle)
+        {
+            topLeftHandle.anchoredPosition = new Vector2(blPos.x, trPos.y);
+            bottomRightHandle.anchoredPosition = new Vector2(trPos.x, blPos.y);
+        }
+        else if (currentlyDraggedHandle == bottomLeftHandle)
+        {
+            topLeftHandle.anchoredPosition = new Vector2(blPos.x, trPos.y);
+            bottomRightHandle.anchoredPosition = new Vector2(trPos.x, blPos.y);
         }
 
-        Rect finalRect = imageDisplay.uvRect;
-        finalRect.x = Mathf.Clamp(finalRect.x, 0, 1 - finalRect.width);
-        finalRect.y = Mathf.Clamp(finalRect.y, 0, 1 - finalRect.height);
-        imageDisplay.uvRect = finalRect;
+        Vector2 final_bl = bottomLeftHandle.anchoredPosition;
+        Vector2 final_tr = topRightHandle.anchoredPosition;
+
+        cropAreaVisual.anchoredPosition = final_bl;
+        cropAreaVisual.sizeDelta = final_tr - final_bl;
     }
 
     void ApplyCrop()
     {
         if (currentTexture == null) return;
-        Rect cropRect = imageDisplay.uvRect;
-        int x = Mathf.FloorToInt(cropRect.x * currentTexture.width);
-        int y = Mathf.FloorToInt(cropRect.y * currentTexture.height);
-        int w = Mathf.FloorToInt(cropRect.width * currentTexture.width);
-        int h = Mathf.FloorToInt(cropRect.height * currentTexture.height);
 
-        Texture2D croppedTexture = new Texture2D(w, h, currentTexture.format, false);
-        RenderTexture rt = RenderTexture.GetTemporary(w, h);
-        Graphics.Blit(currentTexture, rt, cropRect.size, cropRect.position);
+        var cropControlsRectTransform = (RectTransform)cropAreaVisual.parent;
+        Vector2 bl_handle_local = bottomLeftHandle.anchoredPosition;
+        Vector2 tr_handle_local = topRightHandle.anchoredPosition;
+
+        Rect displayRect = cropControlsRectTransform.rect;
+
+        float normX = (bl_handle_local.x - displayRect.x) / displayRect.width;
+        float normY = (bl_handle_local.y - displayRect.y) / displayRect.height;
+        float normW = (tr_handle_local.x - bl_handle_local.x) / displayRect.width;
+        float normH = (tr_handle_local.y - bl_handle_local.y) / displayRect.height;
+
+        int texX = (int)(normX * currentTexture.width);
+        int texY = (int)(normY * currentTexture.height);
+        int texW = (int)(normW * currentTexture.width);
+        int texH = (int)(normH * currentTexture.height);
+
+        if (texW <= 0 || texH <= 0) return;
+
+        Texture2D croppedTexture = new Texture2D(texW, texH, currentTexture.format, false);
+        RenderTexture rt = RenderTexture.GetTemporary(texW, texH);
+        Graphics.Blit(currentTexture, rt, new Vector2(normW, normH), new Vector2(normX, normY));
         RenderTexture previous = RenderTexture.active;
         RenderTexture.active = rt;
-        croppedTexture.ReadPixels(new Rect(0, 0, w, h), 0, 0);
+        croppedTexture.ReadPixels(new Rect(0, 0, texW, texH), 0, 0);
         croppedTexture.Apply();
         RenderTexture.active = previous;
         RenderTexture.ReleaseTemporary(rt);
 
         Destroy(currentTexture);
         currentTexture = croppedTexture;
-        imageDisplay.texture = currentTexture;
-        imageDisplay.uvRect = new Rect(0, 0, 1, 1);
-        if (aspectFitter != null) { aspectFitter.aspectRatio = (float)currentTexture.width / (float)currentTexture.height; }
+
+        if (imageDisplay != null) imageDisplay.texture = currentTexture;
+        if (aspectFitter != null) aspectFitter.aspectRatio = (float)currentTexture.width / (float)currentTexture.height;
+
         OnClickDeleteAllMarkersButton();
+        SetCropControlsActive(false);
         SetMode(OperatingMode.ImageLoaded);
-        noticeText.text = "圖片裁切完成。";
     }
+    #endregion
 
-    void ResetCrop()
-    {
-        imageDisplay.uvRect = new Rect(0, 0, 1, 1);
-        noticeText.text = "裁切已重設。";
-    }
+    #region Marker Handling and Mode Logics
 
-    #region Unchanged Methods
     public void OnClickCropModeButton() => SetMode(OperatingMode.Cropping);
     public void OnClickEditModeButton() => SetMode(OperatingMode.Editing);
     public void OnClickNumberingModeButton() => SetMode(OperatingMode.Numbering);
-    public void OnClickDeleteAllMarkersButton() { foreach (var marker in allMarkers) { Destroy(marker); } allMarkers.Clear(); annotations.Clear(); currentlySelectedMarker = null; if (currentMode == OperatingMode.Editing || currentMode == OperatingMode.None) noticeText.text = "所有標記框已清除"; }
+
+    public void OnClickDeleteAllMarkersButton() { foreach (var marker in allMarkers) { Destroy(marker); } allMarkers.Clear(); annotations.Clear(); currentlySelectedMarker = null; currentNumberingIndex = 1; if (currentMode == OperatingMode.Editing || currentMode == OperatingMode.None) noticeText.text = "所有標記框已清除"; }
     public void OnClickDeleteAllNumbersButton() { foreach (var markerGO in allMarkers) { markerGO.GetComponent<MarkerBehaviour>().SetActionButtonText(""); } currentNumberingIndex = 1; noticeText.text = "所有編號已清除，請重新編號"; }
+
     void UpdateMarkersForViewingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); behaviour.SetDraggable(false); behaviour.SetActionButtonActive(false); } }
     void UpdateMarkersForEditingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); behaviour.SetDraggable(true); behaviour.SetActionButtonActive(false); } }
-    void UpdateMarkersForNumberingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); behaviour.SetDraggable(false); Button btn = behaviour.GetActionButton(); if (btn != null) { behaviour.SetActionButtonActive(true); btn.onClick.RemoveAllListeners(); btn.onClick.AddListener(() => NumberingAction(behaviour)); } } }
+
+    void UpdateMarkersForNumberingMode()
+    {
+        foreach (var markerGO in allMarkers)
+        {
+            var behaviour = markerGO.GetComponent<MarkerBehaviour>();
+            behaviour.SetDraggable(false);
+            Button btn = behaviour.GetActionButton();
+            if (btn != null)
+            {
+                behaviour.SetActionButtonActive(true);
+                btn.onClick.RemoveAllListeners();
+                btn.onClick.AddListener(() => NumberingAction(behaviour));
+            }
+        }
+    }
+
     public void DeleteMarker(GameObject markerToDelete) { if (allMarkers.Contains(markerToDelete)) { allMarkers.Remove(markerToDelete); Destroy(markerToDelete); if (currentlySelectedMarker != null && currentlySelectedMarker.gameObject == markerToDelete) { currentlySelectedMarker = null; } } }
-    public void OnMarkerClicked(MarkerBehaviour marker) { if (currentMode == OperatingMode.Numbering) return; if (currentMode == OperatingMode.Editing) { if (currentlySelectedMarker != null && currentlySelectedMarker != marker) { currentlySelectedMarker.SetActionButtonActive(false); } currentlySelectedMarker = marker; Button btn = currentlySelectedMarker.GetActionButton(); if (btn != null) { currentlySelectedMarker.SetActionButtonText("X"); currentlySelectedMarker.SetActionButtonActive(true); btn.onClick.RemoveAllListeners(); btn.onClick.AddListener(() => DeleteMarker(currentlySelectedMarker.gameObject)); } } }
-    private void NumberingAction(MarkerBehaviour marker) { if (currentMode == OperatingMode.Numbering) { var textComponent = marker.GetActionButton()?.GetComponentInChildren<TMP_Text>(); if (textComponent != null && string.IsNullOrEmpty(textComponent.text)) { marker.SetActionButtonText(currentNumberingIndex.ToString()); currentNumberingIndex++; } } }
+
+    public void OnMarkerClicked(MarkerBehaviour marker)
+    {
+        if (currentMode == OperatingMode.Numbering) return;
+
+        if (currentMode == OperatingMode.Editing)
+        {
+            if (currentlySelectedMarker != null && currentlySelectedMarker != marker)
+            {
+                currentlySelectedMarker.SetActionButtonActive(false);
+            }
+            currentlySelectedMarker = marker;
+            Button btn = currentlySelectedMarker.GetActionButton();
+            if (btn != null)
+            {
+                currentlySelectedMarker.SetActionButtonText("X");
+                currentlySelectedMarker.SetActionButtonActive(true);
+                btn.onClick.RemoveAllListeners();
+                btn.onClick.AddListener(() => DeleteMarker(currentlySelectedMarker.gameObject));
+            }
+        }
+    }
+
+    private void NumberingAction(MarkerBehaviour marker)
+    {
+        if (currentMode == OperatingMode.Numbering)
+        {
+            var textComponent = marker.GetActionButton()?.GetComponentInChildren<TMP_Text>();
+            if (textComponent != null && string.IsNullOrEmpty(textComponent.text))
+            {
+                marker.SetActionButtonText(currentNumberingIndex.ToString());
+                currentNumberingIndex++;
+            }
+        }
+    }
+
+    #endregion
+
+    #region Drawing and Instantiation
+
+    void HandleManualDrawing()
+    {
+        Camera cam = imageDisplay.canvas.renderMode == RenderMode.ScreenSpaceOverlay ? null : imageDisplay.canvas.worldCamera;
+        Rect imageRect = markerParent.rect;
+
+        if (Input.GetMouseButtonDown(0))
+        {
+            PointerEventData pointerData = new PointerEventData(EventSystem.current) { position = Input.mousePosition };
+            List<RaycastResult> results = new List<RaycastResult>();
+            EventSystem.current.RaycastAll(pointerData, results);
+            if (results.Any(r => r.gameObject.GetComponentInParent<MarkerBehaviour>() != null || r.gameObject.GetComponent<Button>() != null || r.gameObject.GetComponentInParent<Button>() != null))
+            {
+                return;
+            }
+            if (currentlySelectedMarker != null)
+            {
+                currentlySelectedMarker.SetActionButtonActive(false);
+                currentlySelectedMarker = null;
+            }
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(markerParent, Input.mousePosition, cam, out Vector2 localStartPos))
+            {
+                if (!imageRect.Contains(localStartPos)) { return; }
+                currentDrawingMarker = Instantiate(markerPrefab, markerParent, false);
+                var behaviour = currentDrawingMarker.GetComponent<MarkerBehaviour>();
+                if (behaviour != null) behaviour.enabled = false;
+                var rt = currentDrawingMarker.GetComponent<RectTransform>();
+                rt.pivot = new Vector2(0, 0);
+                rt.anchorMin = new Vector2(0.5f, 0.5f);
+                rt.anchorMax = new Vector2(0.5f, 0.5f);
+                rt.anchoredPosition = localStartPos;
+                manualDrawStartPosition = localStartPos;
+                rt.sizeDelta = Vector2.zero;
+            }
+        }
+        else if (Input.GetMouseButton(0) && currentDrawingMarker != null)
+        {
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(markerParent, Input.mousePosition, cam, out Vector2 currentLocal))
+            {
+                var rt = currentDrawingMarker.GetComponent<RectTransform>();
+                float minX = Mathf.Min(manualDrawStartPosition.x, currentLocal.x);
+                float minY = Mathf.Min(manualDrawStartPosition.y, currentLocal.y);
+                float w = Mathf.Abs(currentLocal.x - manualDrawStartPosition.x);
+                float h = Mathf.Abs(currentLocal.y - manualDrawStartPosition.y);
+                rt.anchoredPosition = new Vector2(minX, minY);
+                rt.sizeDelta = new Vector2(w, h);
+            }
+        }
+        else if (Input.GetMouseButtonUp(0) && currentDrawingMarker != null)
+        {
+            var rt = currentDrawingMarker.GetComponent<RectTransform>();
+            if (rt.sizeDelta.x < 10f || rt.sizeDelta.y < 10f)
+            {
+                Destroy(currentDrawingMarker);
+            }
+            else
+            {
+                Rect parentRect = markerParent.rect;
+                Vector2 finalPos = rt.anchoredPosition;
+                Vector2 finalSize = rt.sizeDelta;
+                float newAnchorMinX = (finalPos.x - parentRect.x) / parentRect.width;
+                float newAnchorMinY = (finalPos.y - parentRect.y) / parentRect.height;
+                float newAnchorMaxX = (finalPos.x + finalSize.x - parentRect.x) / parentRect.width;
+                float newAnchorMaxY = (finalPos.y + finalSize.y - parentRect.y) / parentRect.height;
+                rt.anchorMin = new Vector2(newAnchorMinX, newAnchorMinY);
+                rt.anchorMax = new Vector2(newAnchorMaxX, newAnchorMaxY);
+                rt.anchoredPosition = Vector2.zero;
+                rt.sizeDelta = Vector2.zero;
+                var behaviour = currentDrawingMarker.GetComponent<MarkerBehaviour>();
+                if (behaviour != null)
+                {
+                    behaviour.enabled = true;
+                    behaviour.Initialize(this, rt);
+                    behaviour.SetDraggable(true);
+                }
+                if (currentlySelectedMarker != null) { currentlySelectedMarker.SetActionButtonActive(false); }
+                allMarkers.Add(currentDrawingMarker);
+                SetMode(OperatingMode.Editing);
+                OnMarkerClicked(behaviour);
+            }
+            currentDrawingMarker = null;
+        }
+    }
 
     GameObject InstantiateMarker(Vector2 normalizedPosition, Vector2 normalizedSize)
     {
@@ -304,103 +535,6 @@ public class HoleAnnotationTool : MonoBehaviour
         }
         allMarkers.Add(markerGO);
         return markerGO;
-    }
-
-    void HandleManualDrawing()
-    {
-        Camera cam = imageDisplay.canvas.renderMode == RenderMode.ScreenSpaceCamera ? imageDisplay.canvas.worldCamera : null;
-        Rect imageRect = markerParent.rect;
-        Vector2 dragStartLocal = Vector2.zero; // 這個變數現在只在 MouseDown 中臨時使用
-
-        if (Input.GetMouseButtonDown(0))
-        {
-            PointerEventData pointerData = new PointerEventData(EventSystem.current) { position = Input.mousePosition };
-            List<RaycastResult> results = new List<RaycastResult>();
-            EventSystem.current.RaycastAll(pointerData, results);
-            if (results.Any(r => r.gameObject.GetComponentInParent<MarkerBehaviour>() != null || r.gameObject.GetComponent<Button>() != null || r.gameObject.GetComponentInParent<Button>() != null))
-            {
-                return;
-            }
-
-            if (currentlySelectedMarker != null)
-            {
-                currentlySelectedMarker.SetActionButtonActive(false);
-                currentlySelectedMarker = null;
-            }
-
-            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(markerParent, Input.mousePosition, cam, out dragStartLocal))
-            {
-                if (!imageRect.Contains(dragStartLocal)) { return; }
-                currentDrawingMarker = Instantiate(markerPrefab, markerParent, false);
-                var behaviour = currentDrawingMarker.GetComponent<MarkerBehaviour>();
-                if (behaviour != null) behaviour.enabled = false;
-
-                var rt = currentDrawingMarker.GetComponent<RectTransform>();
-                rt.pivot = new Vector2(0, 0);
-                rt.anchorMin = new Vector2(0.5f, 0.5f);
-                rt.anchorMax = new Vector2(0.5f, 0.5f);
-
-                // 【步驟2: 修改】
-                rt.anchoredPosition = dragStartLocal;
-                manualDrawStartPosition = dragStartLocal; // 儲存真正的起始點
-
-                rt.sizeDelta = Vector2.zero;
-            }
-        }
-        else if (Input.GetMouseButton(0) && currentDrawingMarker != null)
-        {
-            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(markerParent, Input.mousePosition, cam, out Vector2 currentLocal))
-            {
-                // 【步驟3: 修改】
-                var rt = currentDrawingMarker.GetComponent<RectTransform>();
-
-                // 使用 manualDrawStartPosition (固定的起始點) 來計算
-                float minX = Mathf.Min(manualDrawStartPosition.x, currentLocal.x);
-                float minY = Mathf.Min(manualDrawStartPosition.y, currentLocal.y);
-                float w = Mathf.Abs(currentLocal.x - manualDrawStartPosition.x);
-                float h = Mathf.Abs(currentLocal.y - manualDrawStartPosition.y);
-
-                rt.anchoredPosition = new Vector2(minX, minY);
-                rt.sizeDelta = new Vector2(w, h);
-            }
-        }
-        else if (Input.GetMouseButtonUp(0) && currentDrawingMarker != null)
-        {
-            var rt = currentDrawingMarker.GetComponent<RectTransform>();
-            if (rt.sizeDelta.x < 10f || rt.sizeDelta.y < 10f)
-            {
-                Destroy(currentDrawingMarker);
-            }
-            else
-            {
-                Rect parentRect = markerParent.rect;
-                Vector2 finalPos = rt.anchoredPosition;
-                Vector2 finalSize = rt.sizeDelta;
-
-                float newAnchorMinX = (finalPos.x - parentRect.x) / parentRect.width;
-                float newAnchorMinY = (finalPos.y - parentRect.y) / parentRect.height;
-                float newAnchorMaxX = (finalPos.x + finalSize.x - parentRect.x) / parentRect.width;
-                float newAnchorMaxY = (finalPos.y + finalSize.y - parentRect.y) / parentRect.height;
-
-                rt.anchorMin = new Vector2(newAnchorMinX, newAnchorMinY);
-                rt.anchorMax = new Vector2(newAnchorMaxX, newAnchorMaxY);
-                rt.anchoredPosition = Vector2.zero;
-                rt.sizeDelta = Vector2.zero;
-
-                var behaviour = currentDrawingMarker.GetComponent<MarkerBehaviour>();
-                if (behaviour != null)
-                {
-                    behaviour.enabled = true;
-                    behaviour.Initialize(this, rt);
-                    behaviour.SetDraggable(true);
-                }
-
-                if (currentlySelectedMarker != null) { currentlySelectedMarker.SetActionButtonActive(false); }
-                allMarkers.Add(currentDrawingMarker);
-                OnMarkerClicked(behaviour);
-            }
-            currentDrawingMarker = null;
-        }
     }
 
     public void SaveJson()
