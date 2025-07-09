@@ -9,3 +9,4 @@ EditorBuildSettings:
     path: Assets/Samples/EfficientDet/EfficientDet.unity
     guid: 660e2ce6e34bb44629f5b9bb71e86ad0
   m_configObjects: {}
+  m_UseUCBPForAssetBundles: 0

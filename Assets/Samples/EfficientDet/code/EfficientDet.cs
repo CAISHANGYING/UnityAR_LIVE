@@ -32,18 +32,15 @@ namespace TensorFlowLite
             }
         }
 
+        // 【核心修正】我們自己宣告公開屬性來儲存尺寸
         public int inputWidth { get; private set; }
         public int inputHeight { get; private set; }
 
+
         const int MAX_DETECTION = 25;
-
-        // [修改] 為了清晰起見，重新命名輸出陣列
-        private readonly float[] output_locations = new float[MAX_DETECTION * 4]; // Bounding boxes
-        private readonly float[] output_classes = new float[MAX_DETECTION];       // Classes
-        private readonly float[] output_scores = new float[MAX_DETECTION];        // Scores
-        // [新增] 標準模型通常還有第四個輸出：偵測到的物件總數
-        private readonly float[] num_detections = new float[1];
-
+        private readonly float[] outputs0 = new float[MAX_DETECTION * 4]; // MAX_DETECTION * [top, left, bottom, right]
+        private readonly float[] outputs1 = new float[MAX_DETECTION]; // Classes
+        private readonly float[] outputs2 = new float[MAX_DETECTION]; // Scores
         private readonly Result[] results = new Result[MAX_DETECTION];
 
         public EfficientDet(Options options)
@@ -52,7 +49,9 @@ namespace TensorFlowLite
             interpreterOptions.AutoAddDelegate(options.delegateType, typeof(byte));
             Load(FileUtil.LoadFile(options.modelPath), interpreterOptions);
 
+            // 【核心修正】在模型載入後，立刻從 interpreter 讀取輸入尺寸
             var inputShape = interpreter.GetInputTensorInfo(0).shape;
+            // TFLite 的標準維度順序是 [batch, height, width, channels]
             inputHeight = inputShape[1];
             inputWidth = inputShape[2];
         }
@@ -61,48 +60,33 @@ namespace TensorFlowLite
         {
             Load(FileUtil.LoadFile(options.modelPath), interpreterOptions);
 
+            // 【核心修正】在模型載入後，立刻從 interpreter 讀取輸入尺寸
             var inputShape = interpreter.GetInputTensorInfo(0).shape;
             inputHeight = inputShape[1];
             inputWidth = inputShape[2];
         }
 
-        // [修改] 這是最關鍵的修改。我們將 PostProcess 改為最常見、最標準的輸出順序。
-        // 大多數 TensorFlow Hub 上的物件偵測模型都遵循此順序。
         protected override void PostProcess()
         {
-            // 索引 0: Bounding Box Locations (y_min, x_min, y_max, x_max)
-            interpreter.GetOutputTensorData(0, output_locations.AsSpan());
-            // 索引 1: Classes
-            interpreter.GetOutputTensorData(1, output_classes.AsSpan());
-            // 索引 2: Scores
-            interpreter.GetOutputTensorData(2, output_scores.AsSpan());
-            // 索引 3: Number of detections
-            interpreter.GetOutputTensorData(3, num_detections.AsSpan());
+            interpreter.GetOutputTensorData(1, outputs0.AsSpan());
+            interpreter.GetOutputTensorData(3, outputs1.AsSpan());
+            interpreter.GetOutputTensorData(0, outputs2.AsSpan());
         }
 
         public ReadOnlySpan<Result> GetResults()
         {
             for (int i = 0; i < MAX_DETECTION; i++)
             {
-                // [修改] TensorFlow Hub 的標準 EfficientDet-Lite 模型輸出座標順序是 [ymin, xmin, ymax, xmax]
-                // 這裡我們根據標準順序來解析
+                // Invert Y to adapt Unity UI space
                 int current = i * 4;
-                float ymin = output_locations[current];
-                float xmin = output_locations[current + 1];
-                float ymax = output_locations[current + 2];
-                float xmax = output_locations[current + 3];
-
-                // 轉換座標以適應 Unity UI 空間 (Y軸是反的)
-                // top 在 Unity 中是 1 - ymin
-                float top = 1f - ymin;
-                // bottom 在 Unity 中是 1 - ymax
-                float bottom = 1f - ymax;
-                float left = xmin;
-                float right = xmax;
+                float top = 1f - outputs0[current];
+                float left = outputs0[current + 1];
+                float bottom = 1f - outputs0[current + 2];
+                float right = outputs0[current + 3];
 
                 results[i] = new Result(
-                    classID: (int)output_classes[i],
-                    score: output_scores[i],
+                    classID: (int)outputs1[i],
+                    score: outputs2[i],
                     rect: new Rect(left, top, right - left, top - bottom));
             }
             return results;

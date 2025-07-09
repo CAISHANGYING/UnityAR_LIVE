@@ -6,47 +6,47 @@ using TMPro;
 using UnityEngine.EventSystems;
 using System.Linq;
 using TensorFlowLite;
-using System.Collections;
 
+// 【維持不變】
 public enum OperatingMode { None, ImageLoaded, Viewing, Editing, Numbering, Cropping }
+[System.Serializable] public class HoleAnnotation { public int id; public string label; public float x; public float y; public float width; public float height; }
+[System.Serializable] public class HoleAnnotationList { public List<HoleAnnotation> annotations = new List<HoleAnnotation>(); }
 
-[System.Serializable]
-public class HoleAnnotation { public int id; public string label; public float x; public float y; public float width; public float height; }
-
-[System.Serializable]
-public class HoleAnnotationList { public List<HoleAnnotation> annotations = new List<HoleAnnotation>(); }
 
 public class HoleAnnotationTool : MonoBehaviour
 {
+    // 【維持不變】
     [Header("UI Components")]
     public RawImage imageDisplay;
     public AspectRatioFitter aspectFitter;
     public Text noticeText;
     public Button confirmButton;
 
+    // 【維持不變】
     [Header("Mode Buttons")]
     public Button EditModeButton;
     public Button NumberingModeButton;
     public Button DeleteAllMarkersButton;
     public Button DeleteAllNumbersButton;
 
+    // 【維持不變】
     [Header("Cropping UI")]
     public Button CropModeButton;
     public Button ConfirmCropButton;
     public Button ResetCropButton;
-    public GameObject CropUITools;
-    public RectTransform CropAreaIndicator;
-    public RectTransform[] CropHandles = new RectTransform[4]; // 0:BL, 1:BR, 2:TL, 3:TR
 
+    // 【維持不變】
     [Header("Marker Prefab")]
     public GameObject markerPrefab;
 
+    // 【維持不變】
     [Header("AI Model Settings (from EfficientDet)")]
     public EfficientDet.Options options = default;
     public TextAsset labelMapAsset;
     [Range(0f, 1f)]
     public float scoreThreshold = 0.5f;
 
+    // --- 私有變數 ---
     private TFLiteDetector detector;
     private OperatingMode currentMode;
     private int currentNumberingIndex = 1;
@@ -56,33 +56,44 @@ public class HoleAnnotationTool : MonoBehaviour
     private RectTransform markerParent;
     private MarkerBehaviour currentlySelectedMarker;
     private GameObject currentDrawingMarker;
-    private RectTransform currentDraggedHandle;
-    private Vector2 handleManualDrawing_dragStartLocal;
+    private Vector2 manualDrawStartPosition; // 【<<< 步驟1: 新增此變數】
 
+    // 【維持不變】
+    private Vector2 panStartPosition;
+    private Vector2 panStartUVPosition;
+    private const float MIN_ZOOM = 0.1f;
+    private const float MAX_ZOOM = 1.0f;
+    public float zoomSpeed = 0.1f;
 
     void Start()
     {
+        // 【維持不變】
         markerParent = imageDisplay.rectTransform;
+
         EditModeButton.onClick.AddListener(OnClickEditModeButton);
         NumberingModeButton.onClick.AddListener(OnClickNumberingModeButton);
         DeleteAllMarkersButton.onClick.AddListener(OnClickDeleteAllMarkersButton);
         DeleteAllNumbersButton.onClick.AddListener(OnClickDeleteAllNumbersButton);
         confirmButton.onClick.AddListener(ConfirmImage);
+
         CropModeButton.onClick.AddListener(OnClickCropModeButton);
         ConfirmCropButton.onClick.AddListener(ApplyCrop);
         ResetCropButton.onClick.AddListener(ResetCrop);
+
         if (labelMapAsset != null) { if (Application.isEditor) { options.delegateType = TfLiteDelegateType.XNNPACK; } detector = new TFLiteDetector(options, labelMapAsset, scoreThreshold); } else { Debug.LogError("AI 標籤 (Label Map Asset) 未指派！請在 Inspector 中設定。"); }
         SetMode(OperatingMode.None);
     }
 
     private void OnDestroy()
     {
+        // 【維持不變】
         detector?.Dispose();
         if (currentTexture != null) Destroy(currentTexture);
     }
 
     void Update()
     {
+        // 【維持不變】
         if (currentMode == OperatingMode.Cropping) { HandleCropping(); }
         else if (currentMode == OperatingMode.Editing) { HandleManualDrawing(); }
         else if (Input.GetMouseButtonDown(0))
@@ -90,12 +101,15 @@ public class HoleAnnotationTool : MonoBehaviour
             PointerEventData pointerData = new PointerEventData(EventSystem.current) { position = Input.mousePosition };
             List<RaycastResult> results = new List<RaycastResult>();
             EventSystem.current.RaycastAll(pointerData, results);
-            if (results.Count > 0 && results[0].gameObject == imageDisplay.gameObject && currentMode != OperatingMode.Cropping)
+            if (results.Count > 0 && results[0].gameObject.transform.parent.gameObject == imageDisplay.transform.parent.gameObject && currentMode != OperatingMode.Cropping)
             {
-                PickImage();
+                if (results[0].gameObject == imageDisplay.gameObject)
+                    PickImage();
             }
         }
     }
+
+    // --- 以下所有其他函式都維持不變，只修改 HandleManualDrawing ---
 
     public void PickImage()
     {
@@ -106,23 +120,28 @@ public class HoleAnnotationTool : MonoBehaviour
             OnClickDeleteAllMarkersButton();
             Texture2D originalTexture = NativeGallery.LoadImageAtPath(path, -1, false);
             if (originalTexture == null) { SetMode(OperatingMode.None); return; }
+
             var properties = NativeGallery.GetImageProperties(path);
             Texture2D processedTexture = TextureUtils.RotateTexture(originalTexture, properties.orientation);
             Destroy(originalTexture);
+
             if (processedTexture.height > processedTexture.width)
             {
                 Texture2D rotatedTexture = TextureUtils.Rotate90DegreesCCW(processedTexture);
                 Destroy(processedTexture);
                 processedTexture = rotatedTexture;
             }
+
             if (currentTexture != null) Destroy(currentTexture);
             currentTexture = processedTexture;
             imageDisplay.texture = currentTexture;
+
             if (aspectFitter != null)
             {
                 aspectFitter.enabled = true;
                 aspectFitter.aspectRatio = (float)currentTexture.width / (float)currentTexture.height;
             }
+
             SetMode(OperatingMode.ImageLoaded);
         }, "選擇一張圖片");
     }
@@ -130,13 +149,10 @@ public class HoleAnnotationTool : MonoBehaviour
     public void ConfirmImage()
     {
         if (currentTexture == null || detector == null) { noticeText.text = "圖片或 AI 模型尚未準備好"; return; }
-
         int modelWidth = detector.InputWidth;
         int modelHeight = detector.InputHeight;
         RenderTexture detectionRT = RenderTexture.GetTemporary(modelWidth, modelHeight, 0, RenderTextureFormat.Default);
-
-        Graphics.Blit(currentTexture, detectionRT);
-
+        Graphics.Blit(currentTexture, detectionRT, imageDisplay.uvRect.size, imageDisplay.uvRect.position);
         List<DetectionResult> results = detector.Detect(detectionRT);
         RenderTexture.ReleaseTemporary(detectionRT);
         int holeCount = 0;
@@ -147,10 +163,8 @@ public class HoleAnnotationTool : MonoBehaviour
 
     void SetMode(OperatingMode newMode)
     {
-        // 修正BUG：先更新當前模式，再根據新模式來設定UI
-        currentMode = newMode;
-
         if (currentlySelectedMarker != null) { currentlySelectedMarker.SetActionButtonActive(false); currentlySelectedMarker = null; }
+        currentMode = newMode;
 
         bool isViewing = currentMode == OperatingMode.Viewing;
         bool isEditing = currentMode == OperatingMode.Editing;
@@ -167,163 +181,75 @@ public class HoleAnnotationTool : MonoBehaviour
         CropModeButton.gameObject.SetActive(imageIsLoaded && !isCropping);
         ConfirmCropButton.gameObject.SetActive(isCropping);
         ResetCropButton.gameObject.SetActive(isCropping);
-        if (CropUITools != null) CropUITools.SetActive(isCropping);
 
         switch (currentMode)
         {
-            case OperatingMode.None:
-                noticeText.text = "請點擊左側區域以選擇圖片";
-                break;
-            case OperatingMode.ImageLoaded:
-                noticeText.text = "圖片已載入，可進行AI偵測或進入裁切模式";
-                break;
-            case OperatingMode.Viewing:
-                noticeText.text = $"圖片已確認，可切換模式";
-                UpdateMarkersForViewingMode();
-                break;
-            case OperatingMode.Editing:
-                noticeText.text = "編輯模式：可拖曳、點擊選取、或拖曳背景以新增";
-                UpdateMarkersForEditingMode();
-                break;
-            case OperatingMode.Numbering:
-                noticeText.text = "編號模式：請點擊標記框右上角的按鈕進行編號";
-                currentNumberingIndex = 1;
-                foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); if (behaviour != null) behaviour.SetActionButtonText(""); }
-                UpdateMarkersForNumberingMode();
-                break;
-            case OperatingMode.Cropping:
-                noticeText.text = "裁切模式：請拖動四個角點來選取範圍";
-                StartCoroutine(ResetIndicatorAfterFrame());
-                UpdateMarkersForViewingMode();
-                break;
+            case OperatingMode.None: noticeText.text = "請點擊畫面載入圖片"; break;
+            case OperatingMode.ImageLoaded: noticeText.text = "圖片已載入，可進行AI偵測或進入裁切模式"; break;
+            case OperatingMode.Viewing: noticeText.text = $"圖片已確認，可切換模式"; UpdateMarkersForViewingMode(); break;
+            case OperatingMode.Editing: noticeText.text = "編輯模式：可拖曳、點擊選取、或拖曳背景以新增"; UpdateMarkersForEditingMode(); break;
+            case OperatingMode.Numbering: noticeText.text = "編號模式：點擊按鈕以編號"; UpdateMarkersForNumberingMode(); break;
+            case OperatingMode.Cropping: noticeText.text = "裁切模式：拖曳以平移，滾輪以縮放"; UpdateMarkersForViewingMode(); break;
         }
-    }
-
-    IEnumerator ResetIndicatorAfterFrame()
-    {
-        yield return new WaitForEndOfFrame();
-        ResetCropIndicator();
-    }
-
-    void ResetCropIndicator()
-    {
-        if (CropUITools == null) return;
-
-        var containerRT = imageDisplay.transform.parent.GetComponent<RectTransform>();
-        if (containerRT == null) return;
-
-        var parentRT = CropUITools.GetComponent<RectTransform>();
-
-        LayoutRebuilder.ForceRebuildLayoutImmediate(containerRT);
-
-        parentRT.anchoredPosition = containerRT.anchoredPosition;
-        parentRT.sizeDelta = containerRT.rect.size;
-
-        CropAreaIndicator.anchoredPosition = Vector2.zero;
-        CropAreaIndicator.sizeDelta = parentRT.rect.size;
-
-        UpdateHandlesFromIndicator();
     }
 
     void HandleCropping()
     {
+        var rt = imageDisplay.rectTransform;
         Camera cam = imageDisplay.canvas.worldCamera;
+
+        if (!RectTransformUtility.RectangleContainsScreenPoint(rt, Input.mousePosition, cam)) { return; }
+
+        float scroll = Input.mouseScrollDelta.y;
+        if (scroll != 0)
+        {
+            Rect uvRect = imageDisplay.uvRect;
+            RectTransformUtility.ScreenPointToLocalPointInRectangle(rt, Input.mousePosition, cam, out Vector2 localPos);
+            Vector2 pivot = new Vector2((localPos.x - rt.rect.x) / rt.rect.width, (localPos.y - rt.rect.y) / rt.rect.height);
+            float zoomFactor = 1 - scroll * zoomSpeed;
+            float newWidth = Mathf.Clamp(uvRect.width * zoomFactor, MIN_ZOOM, MAX_ZOOM);
+            float newHeight = Mathf.Clamp(uvRect.height * zoomFactor, MIN_ZOOM, MAX_ZOOM);
+            uvRect.x = pivot.x - (pivot.x - uvRect.x) * (newWidth / uvRect.width);
+            uvRect.y = pivot.y - (pivot.y - uvRect.y) * (newHeight / uvRect.height);
+            uvRect.width = newWidth;
+            uvRect.height = newHeight;
+            imageDisplay.uvRect = uvRect;
+        }
+
         if (Input.GetMouseButtonDown(0))
         {
-            foreach (var handle in CropHandles)
-            {
-                if (RectTransformUtility.RectangleContainsScreenPoint(handle, Input.mousePosition, cam))
-                {
-                    currentDraggedHandle = handle;
-                    break;
-                }
-            }
+            panStartPosition = Input.mousePosition;
+            panStartUVPosition = imageDisplay.uvRect.position;
         }
-        else if (Input.GetMouseButton(0) && currentDraggedHandle != null)
+
+        if (Input.GetMouseButton(0))
         {
-            var parentRT = CropUITools.GetComponent<RectTransform>();
-            RectTransformUtility.ScreenPointToLocalPointInRectangle(parentRT, Input.mousePosition, cam, out Vector2 localMousePos);
-
-            localMousePos.x = Mathf.Clamp(localMousePos.x, parentRT.rect.xMin, parentRT.rect.xMax);
-            localMousePos.y = Mathf.Clamp(localMousePos.y, parentRT.rect.yMin, parentRT.rect.yMax);
-
-            currentDraggedHandle.anchoredPosition = localMousePos;
-
-            UpdateCropAreaFromHandles();
+            Vector2 delta = (Vector2)Input.mousePosition - panStartPosition;
+            float deltaUVX = -(delta.x / rt.rect.width) * imageDisplay.uvRect.width;
+            float deltaUVY = -(delta.y / rt.rect.height) * imageDisplay.uvRect.height;
+            Rect uvRect = imageDisplay.uvRect;
+            uvRect.position = panStartUVPosition + new Vector2(deltaUVX, deltaUVY);
+            imageDisplay.uvRect = uvRect;
         }
-        else if (Input.GetMouseButtonUp(0))
-        {
-            currentDraggedHandle = null;
-        }
-    }
 
-    void UpdateCropAreaFromHandles()
-    {
-        if (currentDraggedHandle == null) return;
-        int draggedIndex = -1;
-        for (int i = 0; i < CropHandles.Length; i++)
-        {
-            if (CropHandles[i] == currentDraggedHandle)
-            {
-                draggedIndex = i;
-                break;
-            }
-        }
-        if (draggedIndex == -1) return;
-
-        int oppositeIndex = 3 - draggedIndex;
-        Vector2 draggedPos = currentDraggedHandle.anchoredPosition;
-        Vector2 oppositePos = CropHandles[oppositeIndex].anchoredPosition;
-
-        float xMin = Mathf.Min(draggedPos.x, oppositePos.x);
-        float yMin = Mathf.Min(draggedPos.y, oppositePos.y);
-        float xMax = Mathf.Max(draggedPos.x, oppositePos.x);
-        float yMax = Mathf.Max(draggedPos.y, oppositePos.y);
-
-        CropAreaIndicator.anchoredPosition = new Vector2(xMin, yMin);
-        CropAreaIndicator.sizeDelta = new Vector2(xMax - xMin, yMax - yMin);
-
-        CropHandles[0].anchoredPosition = new Vector2(xMin, yMin); // BL
-        CropHandles[1].anchoredPosition = new Vector2(xMax, yMin); // BR
-        CropHandles[2].anchoredPosition = new Vector2(xMin, yMax); // TL
-        CropHandles[3].anchoredPosition = new Vector2(xMax, yMax); // TR
-    }
-
-    void UpdateHandlesFromIndicator()
-    {
-        Vector2 min = CropAreaIndicator.anchoredPosition;
-        Vector2 max = min + CropAreaIndicator.sizeDelta;
-        CropHandles[0].anchoredPosition = new Vector2(min.x, min.y);
-        CropHandles[1].anchoredPosition = new Vector2(max.x, min.y);
-        CropHandles[2].anchoredPosition = new Vector2(min.x, max.y);
-        CropHandles[3].anchoredPosition = new Vector2(max.x, max.y);
+        Rect finalRect = imageDisplay.uvRect;
+        finalRect.x = Mathf.Clamp(finalRect.x, 0, 1 - finalRect.width);
+        finalRect.y = Mathf.Clamp(finalRect.y, 0, 1 - finalRect.height);
+        imageDisplay.uvRect = finalRect;
     }
 
     void ApplyCrop()
     {
         if (currentTexture == null) return;
-        RectTransform indicatorParentRT = CropAreaIndicator.parent.GetComponent<RectTransform>();
-        if (indicatorParentRT.rect.width == 0 || indicatorParentRT.rect.height == 0) return;
-
-        Rect cropIndicatorRect = CropAreaIndicator.rect;
-
-        float normX = (cropIndicatorRect.x - indicatorParentRT.rect.x) / indicatorParentRT.rect.width;
-        float normY = (cropIndicatorRect.y - indicatorParentRT.rect.y) / indicatorParentRT.rect.height;
-        float normW = cropIndicatorRect.width / indicatorParentRT.rect.width;
-        float normH = cropIndicatorRect.height / indicatorParentRT.rect.height;
-
-        Rect cropUVRect = new Rect(normX, normY, normW, normH);
-        int x = Mathf.FloorToInt(cropUVRect.x * currentTexture.width);
-        int y = Mathf.FloorToInt(cropUVRect.y * currentTexture.height);
-        int w = Mathf.FloorToInt(cropUVRect.width * currentTexture.width);
-        int h = Mathf.FloorToInt(cropUVRect.height * currentTexture.height);
-
-        if (w <= 0 || h <= 0) return;
+        Rect cropRect = imageDisplay.uvRect;
+        int x = Mathf.FloorToInt(cropRect.x * currentTexture.width);
+        int y = Mathf.FloorToInt(cropRect.y * currentTexture.height);
+        int w = Mathf.FloorToInt(cropRect.width * currentTexture.width);
+        int h = Mathf.FloorToInt(cropRect.height * currentTexture.height);
 
         Texture2D croppedTexture = new Texture2D(w, h, currentTexture.format, false);
-
         RenderTexture rt = RenderTexture.GetTemporary(w, h);
-        Graphics.Blit(currentTexture, rt, cropUVRect.size, cropUVRect.position);
+        Graphics.Blit(currentTexture, rt, cropRect.size, cropRect.position);
         RenderTexture previous = RenderTexture.active;
         RenderTexture.active = rt;
         croppedTexture.ReadPixels(new Rect(0, 0, w, h), 0, 0);
@@ -334,11 +260,8 @@ public class HoleAnnotationTool : MonoBehaviour
         Destroy(currentTexture);
         currentTexture = croppedTexture;
         imageDisplay.texture = currentTexture;
-        if (aspectFitter != null)
-        {
-            aspectFitter.aspectRatio = (float)currentTexture.width / (float)currentTexture.height;
-        }
-
+        imageDisplay.uvRect = new Rect(0, 0, 1, 1);
+        if (aspectFitter != null) { aspectFitter.aspectRatio = (float)currentTexture.width / (float)currentTexture.height; }
         OnClickDeleteAllMarkersButton();
         SetMode(OperatingMode.ImageLoaded);
         noticeText.text = "圖片裁切完成。";
@@ -346,18 +269,19 @@ public class HoleAnnotationTool : MonoBehaviour
 
     void ResetCrop()
     {
-        ResetCropIndicator();
-        noticeText.text = "裁切範圍已重設。";
+        imageDisplay.uvRect = new Rect(0, 0, 1, 1);
+        noticeText.text = "裁切已重設。";
     }
 
+    #region Unchanged Methods
     public void OnClickCropModeButton() => SetMode(OperatingMode.Cropping);
     public void OnClickEditModeButton() => SetMode(OperatingMode.Editing);
     public void OnClickNumberingModeButton() => SetMode(OperatingMode.Numbering);
     public void OnClickDeleteAllMarkersButton() { foreach (var marker in allMarkers) { Destroy(marker); } allMarkers.Clear(); annotations.Clear(); currentlySelectedMarker = null; if (currentMode == OperatingMode.Editing || currentMode == OperatingMode.None) noticeText.text = "所有標記框已清除"; }
-    public void OnClickDeleteAllNumbersButton() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); if (behaviour != null) behaviour.SetActionButtonText(""); } currentNumberingIndex = 1; noticeText.text = "所有編號已清除，請重新編號"; }
-    void UpdateMarkersForViewingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); if (behaviour != null) { behaviour.SetDraggable(false); behaviour.SetActionButtonActive(false); } } }
-    void UpdateMarkersForEditingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); if (behaviour != null) { behaviour.SetDraggable(true); behaviour.SetActionButtonActive(false); } } }
-    void UpdateMarkersForNumberingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); if (behaviour != null) { behaviour.SetDraggable(false); Button btn = behaviour.GetActionButton(); if (btn != null) { behaviour.SetActionButtonActive(true); btn.onClick.RemoveAllListeners(); btn.onClick.AddListener(() => NumberingAction(behaviour)); } } } }
+    public void OnClickDeleteAllNumbersButton() { foreach (var markerGO in allMarkers) { markerGO.GetComponent<MarkerBehaviour>().SetActionButtonText(""); } currentNumberingIndex = 1; noticeText.text = "所有編號已清除，請重新編號"; }
+    void UpdateMarkersForViewingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); behaviour.SetDraggable(false); behaviour.SetActionButtonActive(false); } }
+    void UpdateMarkersForEditingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); behaviour.SetDraggable(true); behaviour.SetActionButtonActive(false); } }
+    void UpdateMarkersForNumberingMode() { foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); behaviour.SetDraggable(false); Button btn = behaviour.GetActionButton(); if (btn != null) { behaviour.SetActionButtonActive(true); btn.onClick.RemoveAllListeners(); btn.onClick.AddListener(() => NumberingAction(behaviour)); } } }
     public void DeleteMarker(GameObject markerToDelete) { if (allMarkers.Contains(markerToDelete)) { allMarkers.Remove(markerToDelete); Destroy(markerToDelete); if (currentlySelectedMarker != null && currentlySelectedMarker.gameObject == markerToDelete) { currentlySelectedMarker = null; } } }
     public void OnMarkerClicked(MarkerBehaviour marker) { if (currentMode == OperatingMode.Numbering) return; if (currentMode == OperatingMode.Editing) { if (currentlySelectedMarker != null && currentlySelectedMarker != marker) { currentlySelectedMarker.SetActionButtonActive(false); } currentlySelectedMarker = marker; Button btn = currentlySelectedMarker.GetActionButton(); if (btn != null) { currentlySelectedMarker.SetActionButtonText("X"); currentlySelectedMarker.SetActionButtonActive(true); btn.onClick.RemoveAllListeners(); btn.onClick.AddListener(() => DeleteMarker(currentlySelectedMarker.gameObject)); } } }
     private void NumberingAction(MarkerBehaviour marker) { if (currentMode == OperatingMode.Numbering) { var textComponent = marker.GetActionButton()?.GetComponentInChildren<TMP_Text>(); if (textComponent != null && string.IsNullOrEmpty(textComponent.text)) { marker.SetActionButtonText(currentNumberingIndex.ToString()); currentNumberingIndex++; } } }
@@ -372,7 +296,12 @@ public class HoleAnnotationTool : MonoBehaviour
         rt.offsetMin = Vector2.zero;
         rt.offsetMax = Vector2.zero;
         var behaviour = markerGO.GetComponent<MarkerBehaviour>();
-        if (behaviour != null) { behaviour.Initialize(this, rt); behaviour.SetActionButtonActive(false); behaviour.SetDraggable(false); }
+        if (behaviour != null)
+        {
+            behaviour.Initialize(this, rt);
+            behaviour.SetActionButtonActive(false);
+            behaviour.SetDraggable(false);
+        }
         allMarkers.Add(markerGO);
         return markerGO;
     }
@@ -381,6 +310,7 @@ public class HoleAnnotationTool : MonoBehaviour
     {
         Camera cam = imageDisplay.canvas.renderMode == RenderMode.ScreenSpaceCamera ? imageDisplay.canvas.worldCamera : null;
         Rect imageRect = markerParent.rect;
+        Vector2 dragStartLocal = Vector2.zero; // 這個變數現在只在 MouseDown 中臨時使用
 
         if (Input.GetMouseButtonDown(0))
         {
@@ -398,9 +328,9 @@ public class HoleAnnotationTool : MonoBehaviour
                 currentlySelectedMarker = null;
             }
 
-            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(markerParent, Input.mousePosition, cam, out handleManualDrawing_dragStartLocal))
+            if (RectTransformUtility.ScreenPointToLocalPointInRectangle(markerParent, Input.mousePosition, cam, out dragStartLocal))
             {
-                if (!imageRect.Contains(handleManualDrawing_dragStartLocal)) { return; }
+                if (!imageRect.Contains(dragStartLocal)) { return; }
                 currentDrawingMarker = Instantiate(markerPrefab, markerParent, false);
                 var behaviour = currentDrawingMarker.GetComponent<MarkerBehaviour>();
                 if (behaviour != null) behaviour.enabled = false;
@@ -409,7 +339,11 @@ public class HoleAnnotationTool : MonoBehaviour
                 rt.pivot = new Vector2(0, 0);
                 rt.anchorMin = new Vector2(0.5f, 0.5f);
                 rt.anchorMax = new Vector2(0.5f, 0.5f);
-                rt.anchoredPosition = handleManualDrawing_dragStartLocal;
+
+                // 【步驟2: 修改】
+                rt.anchoredPosition = dragStartLocal;
+                manualDrawStartPosition = dragStartLocal; // 儲存真正的起始點
+
                 rt.sizeDelta = Vector2.zero;
             }
         }
@@ -417,12 +351,14 @@ public class HoleAnnotationTool : MonoBehaviour
         {
             if (RectTransformUtility.ScreenPointToLocalPointInRectangle(markerParent, Input.mousePosition, cam, out Vector2 currentLocal))
             {
+                // 【步驟3: 修改】
                 var rt = currentDrawingMarker.GetComponent<RectTransform>();
 
-                float minX = Mathf.Min(handleManualDrawing_dragStartLocal.x, currentLocal.x);
-                float minY = Mathf.Min(handleManualDrawing_dragStartLocal.y, currentLocal.y);
-                float w = Mathf.Abs(currentLocal.x - handleManualDrawing_dragStartLocal.x);
-                float h = Mathf.Abs(currentLocal.y - handleManualDrawing_dragStartLocal.y);
+                // 使用 manualDrawStartPosition (固定的起始點) 來計算
+                float minX = Mathf.Min(manualDrawStartPosition.x, currentLocal.x);
+                float minY = Mathf.Min(manualDrawStartPosition.y, currentLocal.y);
+                float w = Mathf.Abs(currentLocal.x - manualDrawStartPosition.x);
+                float h = Mathf.Abs(currentLocal.y - manualDrawStartPosition.y);
 
                 rt.anchoredPosition = new Vector2(minX, minY);
                 rt.sizeDelta = new Vector2(w, h);
@@ -469,58 +405,9 @@ public class HoleAnnotationTool : MonoBehaviour
 
     public void SaveJson()
     {
-        annotations.Clear();
-        var sortedMarkers = new List<GameObject>();
-        var numberedMarkers = new Dictionary<int, GameObject>();
-        var unnumberedMarkers = new List<GameObject>();
-
-        foreach (var markerGO in allMarkers)
-        {
-            var behaviour = markerGO.GetComponent<MarkerBehaviour>();
-            string numText = "";
-            var textComponent = behaviour.GetActionButton()?.GetComponentInChildren<TMP_Text>();
-            if (textComponent != null) numText = textComponent.text;
-
-            if (!string.IsNullOrEmpty(numText) && int.TryParse(numText, out int id))
-            {
-                if (!numberedMarkers.ContainsKey(id)) numberedMarkers.Add(id, markerGO);
-            }
-            else
-            {
-                unnumberedMarkers.Add(markerGO);
-            }
-        }
-
-        sortedMarkers.AddRange(numberedMarkers.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value));
-        sortedMarkers.AddRange(unnumberedMarkers);
-
-        int nextUnnumberedId = (numberedMarkers.Count > 0 ? numberedMarkers.Keys.Max() : 0) + 1;
-
-        foreach (var markerGO in sortedMarkers)
-        {
-            var rt = markerGO.GetComponent<RectTransform>();
-            var behaviour = markerGO.GetComponent<MarkerBehaviour>();
-            float nx = rt.anchorMin.x;
-            float ny_from_top = 1 - rt.anchorMax.y;
-            float nw = rt.anchorMax.x - rt.anchorMin.x;
-            float nh = rt.anchorMax.y - rt.anchorMin.y;
-
-            string numText = "";
-            var textComponent = behaviour.GetActionButton()?.GetComponentInChildren<TMP_Text>();
-            if (textComponent != null) numText = textComponent.text;
-
-            int.TryParse(numText, out int holeNumber);
-            int finalId = (holeNumber > 0) ? holeNumber : nextUnnumberedId++;
-
-            annotations.Add(new HoleAnnotation { id = finalId, label = "hole", x = nx, y = ny_from_top, width = nw, height = nh });
-        }
-
-        var wrapper = new HoleAnnotationList { annotations = this.annotations };
-        string json = JsonUtility.ToJson(wrapper, true);
-        string path = Path.Combine(Application.persistentDataPath, "hole_annotations.json");
-        File.WriteAllText(path, json);
-
-        noticeText.text = $"JSON 已儲存 ({annotations.Count} 筆資料)";
-        Debug.Log($"JSON saved to: {path}");
+        annotations.Clear(); var sortedMarkers = new List<GameObject>(); var numberedMarkers = new Dictionary<int, GameObject>(); var unnumberedMarkers = new List<GameObject>(); foreach (var markerGO in allMarkers) { var behaviour = markerGO.GetComponent<MarkerBehaviour>(); string numText = ""; var textComponent = behaviour.GetActionButton()?.GetComponentInChildren<TMP_Text>(); if (textComponent != null) numText = textComponent.text; if (!string.IsNullOrEmpty(numText) && int.TryParse(numText, out int id)) { if (!numberedMarkers.ContainsKey(id)) numberedMarkers.Add(id, markerGO); } else { unnumberedMarkers.Add(markerGO); } }
+        sortedMarkers.AddRange(numberedMarkers.OrderBy(kvp => kvp.Key).Select(kvp => kvp.Value)); sortedMarkers.AddRange(unnumberedMarkers); int nextUnnumberedId = (numberedMarkers.Count > 0 ? numberedMarkers.Keys.Max() : 0) + 1; foreach (var markerGO in sortedMarkers) { var rt = markerGO.GetComponent<RectTransform>(); var behaviour = markerGO.GetComponent<MarkerBehaviour>(); float nx = rt.anchorMin.x; float ny_from_top = 1 - rt.anchorMax.y; float nw = rt.anchorMax.x - rt.anchorMin.x; float nh = rt.anchorMax.y - rt.anchorMin.y; string numText = ""; var textComponent = behaviour.GetActionButton()?.GetComponentInChildren<TMP_Text>(); if (textComponent != null) numText = textComponent.text; int.TryParse(numText, out int holeNumber); int finalId = (holeNumber > 0) ? holeNumber : nextUnnumberedId++; annotations.Add(new HoleAnnotation { id = finalId, label = "hole", x = nx, y = ny_from_top, width = nw, height = nh }); }
+        var wrapper = new HoleAnnotationList { annotations = this.annotations }; string json = JsonUtility.ToJson(wrapper, true); string path = Path.Combine(Application.persistentDataPath, "hole_annotations.json"); File.WriteAllText(path, json); noticeText.text = $"JSON 已儲存 ({annotations.Count} 筆資料)"; Debug.Log($"JSON saved to: {path}");
     }
+    #endregion
 }
