@@ -197,25 +197,19 @@ public class HoleAnnotationTool : MonoBehaviour
                 foreach (var markerGO in allMarkers) { markerGO.GetComponent<MarkerBehaviour>().SetActionButtonText(""); }
                 UpdateMarkersForNumberingMode();
                 break;
-            // 【步驟1: 已修改】
             case OperatingMode.Cropping:
                 noticeText.text = "裁切模式：請拖曳角落控制點以調整範圍";
                 UpdateMarkersForViewingMode();
                 SetCropControlsActive(true);
-                StartCoroutine(ResetHandlesAfterFrame()); // 改為啟動協程
+                StartCoroutine(ResetHandlesAfterFrame());
                 break;
         }
     }
 
     #region Cropping Logic
-
-    // 【步驟2: 已新增】
     private System.Collections.IEnumerator ResetHandlesAfterFrame()
     {
-        // 等待當前畫面影格的結尾，此時所有UI佈局都已計算完畢
         yield return new WaitForEndOfFrame();
-
-        // 現在才執行位置設定
         ResetCropHandles();
     }
 
@@ -321,21 +315,33 @@ public class HoleAnnotationTool : MonoBehaviour
         cropAreaVisual.sizeDelta = final_tr - final_bl;
     }
 
+    // 【已重寫】採用最穩定的世界座標來計算裁切
     void ApplyCrop()
     {
         if (currentTexture == null) return;
 
-        var cropControlsRectTransform = (RectTransform)cropAreaVisual.parent;
-        Vector2 bl_handle_local = bottomLeftHandle.anchoredPosition;
-        Vector2 tr_handle_local = topRightHandle.anchoredPosition;
+        // 1. 獲取圖片在世界座標中的四個角，建立一個參考座標系
+        Vector3[] imageCorners = new Vector3[4];
+        imageDisplay.rectTransform.GetWorldCorners(imageCorners);
+        Vector3 img_bl_world = imageCorners[0]; // 圖片的左下角世界座標
+        Vector3 img_tr_world = imageCorners[2]; // 圖片的右上角世界座標
 
-        Rect displayRect = cropControlsRectTransform.rect;
+        float img_width_world = img_tr_world.x - img_bl_world.x;
+        float img_height_world = img_tr_world.y - img_bl_world.y;
 
-        float normX = (bl_handle_local.x - displayRect.x) / displayRect.width;
-        float normY = (bl_handle_local.y - displayRect.y) / displayRect.height;
-        float normW = (tr_handle_local.x - bl_handle_local.x) / displayRect.width;
-        float normH = (tr_handle_local.y - bl_handle_local.y) / displayRect.height;
+        if (img_width_world <= 0 || img_height_world <= 0) return;
 
+        // 2. 獲取裁切控制點在世界座標中的位置
+        Vector3 bl_handle_world = bottomLeftHandle.position;
+        Vector3 tr_handle_world = topRightHandle.position;
+
+        // 3. 根據世界座標的相對位置，計算出正規化(0-1)的裁切參數
+        float normX = (bl_handle_world.x - img_bl_world.x) / img_width_world;
+        float normY = (bl_handle_world.y - img_bl_world.y) / img_height_world;
+        float normW = (tr_handle_world.x - bl_handle_world.x) / img_width_world;
+        float normH = (tr_handle_world.y - bl_handle_world.y) / img_height_world;
+
+        // 4. 計算實際像素
         int texX = (int)(normX * currentTexture.width);
         int texY = (int)(normY * currentTexture.height);
         int texW = (int)(normW * currentTexture.width);
@@ -343,6 +349,7 @@ public class HoleAnnotationTool : MonoBehaviour
 
         if (texW <= 0 || texH <= 0) return;
 
+        // 5. 執行裁切
         Texture2D croppedTexture = new Texture2D(texW, texH, currentTexture.format, false);
         RenderTexture rt = RenderTexture.GetTemporary(texW, texH);
         Graphics.Blit(currentTexture, rt, new Vector2(normW, normH), new Vector2(normX, normY));
@@ -350,6 +357,15 @@ public class HoleAnnotationTool : MonoBehaviour
         RenderTexture.active = rt;
         croppedTexture.ReadPixels(new Rect(0, 0, texW, texH), 0, 0);
         croppedTexture.Apply();
+
+        // 6. 儲存檔案
+        byte[] bytes = croppedTexture.EncodeToPNG();
+        string path = Path.Combine(Application.persistentDataPath, "cropped_image.png");
+        File.WriteAllBytes(path, bytes);
+        Debug.Log($"裁切後的圖片已儲存至: {path}");
+        noticeText.text = "圖片已裁切並儲存";
+
+        // 7. 清理與更新
         RenderTexture.active = previous;
         RenderTexture.ReleaseTemporary(rt);
 
@@ -360,7 +376,6 @@ public class HoleAnnotationTool : MonoBehaviour
         if (aspectFitter != null) aspectFitter.aspectRatio = (float)currentTexture.width / (float)currentTexture.height;
 
         OnClickDeleteAllMarkersButton();
-        SetCropControlsActive(false);
         SetMode(OperatingMode.ImageLoaded);
     }
     #endregion
